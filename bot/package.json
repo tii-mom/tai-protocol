@@ -1,0 +1,22 @@
+{
+  "name": "@tai-protocol/bot",
+  "version": "0.1.0",
+  "description": "TAI Protocol Telegram Bot - GrammY",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "@ton/ton": "^15.0.0",
+    "@ton/crypto": "^3.3.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0"
+  }
+}
