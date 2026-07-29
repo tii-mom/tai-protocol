@@ -9,6 +9,7 @@ type Config struct {
 	DatabaseURL string `mapstructure:"DATABASE_URL"`
 	RedisURL    string `mapstructure:"REDIS_URL"`
 	JWTSecret   string `mapstructure:"JWT_SECRET"`
+	TGBotToken  string `mapstructure:"TG_BOT_TOKEN"`
 
 	// TON
 	TonCenterAPI string `mapstructure:"TON_CENTER_API"`

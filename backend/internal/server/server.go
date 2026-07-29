@@ -5,13 +5,17 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tii-mom/tai-protocol/backend/internal/auth"
 	"github.com/tii-mom/tai-protocol/backend/internal/config"
 	"github.com/tii-mom/tai-protocol/backend/internal/handler"
+	"github.com/tii-mom/tai-protocol/backend/internal/service"
+	"github.com/tii-mom/tai-protocol/backend/internal/threeapi"
 )
 
 type Server struct {
 	cfg    *config.Config
 	router *gin.Engine
+	jwt    *auth.JWTManager
 }
 
 func New(cfg *config.Config) *Server {
@@ -20,7 +24,19 @@ func New(cfg *config.Config) *Server {
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
 
-	s := &Server{cfg: cfg, router: r}
+	// Initialize services
+	jwtMgr := auth.NewJWTManager(cfg.JWTSecret)
+	userSvc := service.NewUserService()
+	petSvc := service.NewPetService()
+	apiClient := threeapi.NewClient(threeapi.Config{
+		BaseURL:     cfg.ThreeAPIBaseURL,
+		PlatformKey: cfg.ThreeAPIPlatformKey,
+	})
+
+	// Wire handlers
+	handler.InitHandlers(userSvc, petSvc, jwtMgr, apiClient, cfg.TGBotToken)
+
+	s := &Server{cfg: cfg, router: r, jwt: jwtMgr}
 	s.registerRoutes()
 	return s
 }
@@ -33,86 +49,72 @@ func (s *Server) registerRoutes() {
 
 	api := s.router.Group("/api/v1")
 
-	// User routes
-	user := api.Group("/user")
+	// ─── Public routes (no auth) ─────────────────────────
+	api.POST("/user/auth/tg", handler.TGAuth) // Telegram 登录
+	api.GET("/market/listings", handler.GetListings)
+	api.GET("/market/kline", handler.GetKline)
+	api.GET("/market/ranking", handler.GetRanking)
+	api.GET("/skill/list", handler.GetSkillList)
+	api.GET("/bounty/available", handler.GetBounties)
+
+	// ─── Protected routes (JWT required) ─────────────────
+	protected := api.Group("")
+	protected.Use(s.jwt.Middleware())
 	{
-		user.POST("/auth/tg", handler.TGAuth)           // Telegram 登录
-		user.GET("/me", handler.GetMe)                  // 当前用户信息
-		user.GET("/me/pets", handler.GetMyPets)         // 我的宠物列表
-		user.GET("/me/earnings", handler.GetMyEarnings) // 我的收益
-		user.POST("/wallet/bind", handler.BindWallet)   // 绑定 TON 钱包
+		// User
+		protected.GET("/user/me", handler.GetMe)
+		protected.GET("/user/me/pets", handler.GetMyPets)
+		protected.GET("/user/me/earnings", handler.GetMyEarnings)
+		protected.POST("/user/wallet/bind", handler.BindWallet)
+
+		// Pet
+		protected.POST("/pet/claim", handler.ClaimPet)
+		protected.GET("/pet/:id", handler.GetPet)
+		protected.PUT("/pet/:id/name", handler.RenamePet)
+		protected.POST("/pet/:id/equip-skill", handler.EquipSkill)
+		protected.POST("/pet/:id/onchain", handler.OnchainPet)
+		protected.POST("/pet/execute", handler.PetExecute)
+		protected.GET("/pet/:id/usage", handler.PetUsage)
+
+		// Market (write ops need auth)
+		protected.POST("/market/order", handler.CreateOrder)
+		protected.POST("/market/order/:id/cancel", handler.CancelOrder)
+		protected.POST("/market/buy", handler.BuyNow)
+
+		// Skill
+		protected.POST("/skill/buy", handler.BuySkill)
+		protected.POST("/skill/use", handler.UseSkillBook)
+
+		// Bounty
+		protected.POST("/bounty/:id/accept", handler.AcceptBounty)
+		protected.POST("/bounty/:id/submit", handler.SubmitBounty)
+		protected.POST("/bounty/:id/confirm", handler.ConfirmBounty)
+
+		// Breeding
+		protected.POST("/breed/request", handler.RequestBreed)
+		protected.POST("/breed/:id/confirm", handler.ConfirmBreed)
+		protected.GET("/breed/pool", handler.GetBreedPool)
+
+		// Guild
+		protected.POST("/guild/create", handler.CreateGuild)
+		protected.POST("/guild/:id/join", handler.JoinGuild)
+		protected.GET("/guild/:id", handler.GetGuild)
+		protected.GET("/guild/ranking", handler.GetGuildRanking)
 	}
 
-	// Pet routes
-	pet := api.Group("/pet")
-	{
-		pet.POST("/claim", handler.ClaimPet)            // 领取初始宠物
-		pet.GET("/:id", handler.GetPet)                 // 宠物详情
-		pet.PUT("/:id/name", handler.RenamePet)         // 改名
-		pet.POST("/:id/equip-skill", handler.EquipSkill) // 装备兽决
-		pet.POST("/:id/onchain", handler.OnchainPet)    // 上链
-		pet.POST("/execute", handler.PetExecute)        // AI代理执行(核心:TAI→3api)
-		pet.GET("/:id/usage", handler.PetUsage)         // 宠物算力用量
-	}
-
-	// Market / Trade routes
-	market := api.Group("/market")
-	{
-		market.GET("/listings", handler.GetListings)     // 在售列表
-		market.GET("/kline", handler.GetKline)           // K线数据
-		market.GET("/ranking", handler.GetRanking)       // 排行榜
-		market.POST("/order", handler.CreateOrder)       // 挂单
-		market.POST("/order/:id/cancel", handler.CancelOrder) // 撤单
-		market.POST("/buy", handler.BuyNow)             // 一口价购买
-	}
-
-	// Skill (兽决) routes
-	skill := api.Group("/skill")
-	{
-		skill.GET("/list", handler.GetSkillList)         // 兽决商城
-		skill.POST("/buy", handler.BuySkill)            // 购买兽决
-		skill.POST("/use", handler.UseSkillBook)        // 打书
-	}
-
-	// Bounty routes
-	bounty := api.Group("/bounty")
-	{
-		bounty.GET("/available", handler.GetBounties)    // 可接任务
-		bounty.POST("/:id/accept", handler.AcceptBounty) // 接单
-		bounty.POST("/:id/submit", handler.SubmitBounty) // 提交结果
-		bounty.POST("/:id/confirm", handler.ConfirmBounty) // 用户确认
-	}
-
-	// Breeding routes
-	breed := api.Group("/breed")
-	{
-		breed.POST("/request", handler.RequestBreed)    // 发起繁殖
-		breed.POST("/:id/confirm", handler.ConfirmBreed) // 确认繁殖
-		breed.GET("/pool", handler.GetBreedPool)        // 公会繁殖池
-	}
-
-	// Guild routes
-	guild := api.Group("/guild")
-	{
-		guild.POST("/create", handler.CreateGuild)
-		guild.POST("/:id/join", handler.JoinGuild)
-		guild.GET("/:id", handler.GetGuild)
-		guild.GET("/ranking", handler.GetGuildRanking)
-	}
-
-	// Admin routes (protected)
+	// ─── Admin routes (separate auth, TODO: admin middleware) ───
 	admin := api.Group("/admin")
 	{
-		admin.POST("/pet/mint", handler.AdminMintPet)       // 铸造宠物
-		admin.POST("/skill/mint", handler.AdminMintSkill)   // 铸造兽决
-		admin.PUT("/market/price", handler.AdminSetPrice)   // 调整价格
-		admin.POST("/market/circuit-break", handler.AdminCircuitBreak) // 熔断
-		admin.GET("/stats", handler.AdminStats)             // 后台统计
+		admin.POST("/pet/mint", handler.AdminMintPet)
+		admin.POST("/skill/mint", handler.AdminMintSkill)
+		admin.PUT("/market/price", handler.AdminSetPrice)
+		admin.POST("/market/circuit-break", handler.AdminCircuitBreak)
+		admin.GET("/stats", handler.AdminStats)
 	}
 }
 
 func (s *Server) Run() error {
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
-	log.Printf("🚀 TAI Protocol API starting on %s", addr)
+	log.Printf("TAI Protocol API starting on %s", addr)
 	return s.router.Run(addr)
 }
