@@ -87,6 +87,8 @@ func (s *Server) registerRoutes() {
 		protected.POST("/skill/use", handler.UseSkillBook)
 
 		// Bounty
+		protected.POST("/bounty/create", handler.CreateBounty)
+		protected.GET("/bounty/mine", handler.GetMyBounties)
 		protected.POST("/bounty/:id/accept", handler.AcceptBounty)
 		protected.POST("/bounty/:id/submit", handler.SubmitBounty)
 		protected.POST("/bounty/:id/confirm", handler.ConfirmBounty)

@@ -181,6 +181,102 @@ bot.command("breed", async (ctx: Context) => {
   await ctx.reply("🧬 繁殖系统开发中，即将上线！");
 });
 
+bot.command("bounty", async (ctx: Context) => {
+  const token = await authenticate(ctx);
+  if (!token) return;
+
+  const sess = ctx.session as SessionData;
+  const petId = sess.petId || "";
+
+  try {
+    const resp = await fetch(
+      `${BACKEND_URL}/api/v1/bounty/available?pet_id=${petId}`,
+      { headers: { "Authorization": `Bearer ${token}` } }
+    );
+    const data = await resp.json() as { bounties: any[] };
+
+    if (!data.bounties?.length) {
+      await ctx.reply(
+        "🎯 当前没有可用的赏金任务。\n\n" +
+        "发送 /task 发布一个任务，让宠物去执行！"
+      );
+      return;
+    }
+
+    const list = data.bounties.slice(0, 5).map((b: any, i: number) =>
+      `${i + 1}. [${b.difficulty}] ${b.title}\n   奖励: ${b.reward_tai} TAI + ${b.reward_usdt} USDT`
+    ).join("\n\n");
+
+    await ctx.reply(`🎯 可用赏金任务:\n\n${list}\n\n宠物会自动接取匹配的任务执行。`);
+  } catch {
+    await ctx.reply("获取赏金列表失败。");
+  }
+});
+
+bot.command("task", async (ctx: Context) => {
+  const token = await authenticate(ctx);
+  if (!token) return;
+
+  // Simple inline task creation via command args
+  // Format: /task <difficulty> <title>
+  const args = ctx.message?.text?.split(" ").slice(1) || [];
+  if (args.length < 2) {
+    await ctx.reply(
+      "📋 发布赏金任务:\n\n" +
+      "格式: /task <难度> <任务描述>\n" +
+      "难度: D(简单) C(普通) B(中等) A(困难) S(极难)\n\n" +
+      "示例: /task B 帮我分析TON链上最近7天的DEX交易量趋势\n\n" +
+      "奖励会根据难度自动计算。"
+    );
+    return;
+  }
+
+  const difficulty = args[0].toUpperCase();
+  const title = args.slice(1).join(" ");
+
+  if (!["D", "C", "B", "A", "S"].includes(difficulty)) {
+    await ctx.reply("难度必须是 D/C/B/A/S 之一。");
+    return;
+  }
+
+  // Reward auto-calculated by difficulty
+  const rewards: Record<string, [number, number]> = {
+    D: [5, 0.01], C: [15, 0.03], B: [50, 0.1], A: [150, 0.3], S: [500, 1.0],
+  };
+  const [rewardTAI, rewardUSDT] = rewards[difficulty];
+
+  try {
+    const resp = await fetch(`${BACKEND_URL}/api/v1/bounty/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        title,
+        description: title, // use title as description for simple tasks
+        difficulty,
+        reward_tai: rewardTAI,
+        reward_usdt: rewardUSDT,
+      }),
+    });
+
+    if (resp.ok) {
+      await ctx.reply(
+        `✅ 赏金任务已发布！\n\n` +
+        `📋 ${title}\n` +
+        `难度: ${difficulty} | 奖励: ${rewardTAI} TAI + ${rewardUSDT} USDT\n\n` +
+        `你的机甲宠物正在赶来接单...`
+      );
+    } else {
+      const err = await resp.json() as any;
+      await ctx.reply(`发布失败: ${err.error || "unknown"}`);
+    }
+  } catch {
+    await ctx.reply("网络错误，请稍后重试。");
+  }
+});
+
 // ─── Text handler (naming + chat) ─────────────────────────────────
 
 bot.on("message:text", async (ctx: Context) => {
