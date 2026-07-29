@@ -1,0 +1,102 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tai_protocol}
+      POSTGRES_USER: ${DB_USER:-tai}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-tai_dev_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-tai}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-tai_protocol}
+      - DB_USER=${DB_USER:-tai}
+      - DB_PASSWORD=${DB_PASSWORD:-tai_dev_pass}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TON_API_URL=${TON_API_URL:-https://toncenter.com/api/v2}
+      - TON_API_KEY=${TON_API_KEY:-}
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - TAI_JETTON_ADDRESS=${TAI_JETTON_ADDRESS:-}
+      - PET_NFT_COLLECTION=${PET_NFT_COLLECTION:-}
+      - BREEDING_CONTRACT=${BREEDING_CONTRACT:-}
+      - API_3API_BASE_URL=${API_3API_BASE_URL:-https://3api.shop}
+      - API_3API_KEY=${API_3API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    environment:
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - BACKEND_URL=http://backend:8080
+      - TON_API_URL=${TON_API_URL:-https://toncenter.com/api/v2}
+      - TON_API_KEY=${TON_API_KEY:-}
+      - TON_MNEMONIC=${TON_MNEMONIC:-}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  market-maker:
+    build:
+      context: ./market-maker
+      dockerfile: Dockerfile
+    environment:
+      - BACKEND_URL=http://backend:8080
+      - MM_ENABLED=${MM_ENABLED:-true}
+      - MM_BOT_COUNT=${MM_BOT_COUNT:-5}
+      - MM_BUY_RATIO=${MM_BUY_RATIO:-0.7}
+      - MM_DAILY_CAP_PCT=${MM_DAILY_CAP_PCT:-150}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
