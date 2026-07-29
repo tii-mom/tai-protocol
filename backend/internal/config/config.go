@@ -37,8 +37,9 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	viper.SetConfigFile(".env")
+	viper.SetConfigName(".env")
 	viper.SetConfigType("env")
+	viper.AddConfigPath(".")
 	viper.AutomaticEnv()
 
 	// Defaults
@@ -50,12 +51,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("MM_INTERVAL_MIN_SEC", 30)
 	viper.SetDefault("MM_INTERVAL_MAX_SEC", 300)
 
-	if err := viper.ReadInConfig(); err != nil {
-		// .env file is optional in production (use env vars)
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, err
-		}
-	}
+	// .env is optional — in production, env vars via AutomaticEnv() take over
+	_ = viper.ReadInConfig()
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
