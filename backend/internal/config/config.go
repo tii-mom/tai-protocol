@@ -51,6 +51,18 @@ func Load() (*Config, error) {
 	viper.SetDefault("MM_INTERVAL_MIN_SEC", 30)
 	viper.SetDefault("MM_INTERVAL_MAX_SEC", 300)
 
+	// Bind env vars explicitly (required for Unmarshal to see them)
+	for _, key := range []string{
+		"PORT", "DATABASE_URL", "REDIS_URL", "JWT_SECRET", "TG_BOT_TOKEN",
+		"TON_CENTER_API", "TON_NETWORK",
+		"PET_NFT_COLLECTION", "TAI_TOKEN_MASTER", "BREEDING_CONTRACT",
+		"MARKET_CONTRACT", "BOUNTY_VAULT", "AD_VAULT", "TREASURY_WALLET",
+		"THREEAPI_BASE_URL", "THREEAPI_PLATFORM_KEY", "THREEAPI_INTERNAL_SECRET",
+		"MM_ENABLED", "MM_BOT_COUNT", "MM_INTERVAL_MIN_SEC", "MM_INTERVAL_MAX_SEC",
+	} {
+		_ = viper.BindEnv(key)
+	}
+
 	// .env is optional — in production, env vars via AutomaticEnv() take over
 	_ = viper.ReadInConfig()
 
