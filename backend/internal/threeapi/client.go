@@ -7,204 +7,221 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
-// Client communicates with 3api.shop's internal pet API.
-// The TAI backend uses this to provision pet compute accounts
-// and convert TAI tokens into API call credits.
+// Client is the TAI Protocol's proxy to 3api.shop.
+// Phase 0 model: ONE platform API key, all pet calls proxied through here.
+// Per-pet tracking is done internally; 3api only sees one account.
 type Client struct {
 	baseURL    string
-	secret     string
+	platformKey string // single 3api API key for the tai-pets group
 	httpClient *http.Client
+
+	// Internal usage tracking (flushed to DB periodically)
+	mu       sync.Mutex
+	usageMap map[string]*PetUsage // petID → accumulated usage
+}
+
+// PetUsage tracks per-pet API consumption in memory before DB flush.
+type PetUsage struct {
+	PetID       string
+	Calls       int64
+	TokensUsed  int64
+	TAISpent    float64
+	LastCallAt  time.Time
 }
 
 // Config holds 3api connection settings.
 type Config struct {
-	BaseURL string // e.g. "https://3api.shop"
-	Secret  string // X-Internal-Secret shared key
-	Timeout time.Duration
+	BaseURL     string // e.g. "https://api.3api.shop"
+	PlatformKey string // the tai-pets group API key
+	Timeout     time.Duration
 }
 
 func NewClient(cfg Config) *Client {
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 10 * time.Second
+		cfg.Timeout = 60 * time.Second // AI calls can be slow
+	}
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "https://api.3api.shop"
 	}
 	return &Client{
-		baseURL: cfg.BaseURL,
-		secret:  cfg.Secret,
-		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
-		},
+		baseURL:     cfg.BaseURL,
+		platformKey: cfg.PlatformKey,
+		httpClient:  &http.Client{Timeout: cfg.Timeout},
+		usageMap:    make(map[string]*PetUsage),
 	}
 }
 
-// ─── Request/Response Types ────────────────────────────────────────
+// ─── Chat Completion (main proxy method) ───────────────────────────
 
-type ProvisionRequest struct {
-	PetID     string `json:"pet_id"`
-	OwnerTgID string `json:"owner_tg_id"`
-	PetName   string `json:"pet_name,omitempty"`
+type ChatRequest struct {
+	PetID    string          `json:"pet_id"`
+	Model    string          `json:"model"`
+	Messages []ChatMessage   `json:"messages"`
+	MaxTokens int            `json:"max_tokens,omitempty"`
+	Temperature float64      `json:"temperature,omitempty"`
 }
 
-type ProvisionResponse struct {
-	PetID   string `json:"pet_id"`
-	UserID  int64  `json:"user_id"`
-	APIKey  string `json:"api_key"`
-	GroupID int64  `json:"group_id"`
-	Status  string `json:"status"`
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type CreditRequest struct {
-	PetID          string  `json:"pet_id"`
-	TAIAmount      float64 `json:"tai_amount"`
-	CreditAmount   float64 `json:"credit_amount"`
-	IdempotencyKey string  `json:"idempotency_key"`
+type ChatResponse struct {
+	Content    string `json:"content"`
+	Model      string `json:"model"`
+	TokensUsed int64  `json:"tokens_used"`
+	TAICost    float64 `json:"tai_cost"`
+	Duration   int64  `json:"duration_ms"`
 }
 
-type CreditResponse struct {
-	PetID         string  `json:"pet_id"`
-	Credited      float64 `json:"credited"`
-	NewBalance    float64 `json:"new_balance"`
-	TAISpentTotal float64 `json:"tai_spent_total"`
-}
+// ChatCompletion proxies an OpenAI-compatible chat call to 3api,
+// using the platform key, and records per-pet usage internally.
+func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	start := time.Now()
 
-type PetStatus struct {
-	PetID        string  `json:"pet_id"`
-	Status       string  `json:"status"`
-	Balance      float64 `json:"balance"`
-	TAISpentTotal float64 `json:"tai_spent_total"`
-	DailyTAIUsed float64 `json:"daily_tai_used"`
-	DailyTALimit float64 `json:"daily_tai_limit"`
-	APIKeyStatus string  `json:"api_key_status"`
-}
+	// Build the OpenAI-compatible request body
+	body := map[string]interface{}{
+		"model":    req.Model,
+		"messages": req.Messages,
+	}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
+	if req.Temperature > 0 {
+		body["temperature"] = req.Temperature
+	}
 
-type BatchUsageResponse struct {
-	Pets []PetUsageItem `json:"pets"`
-}
-
-type PetUsageItem struct {
-	PetID        string  `json:"pet_id"`
-	Balance      float64 `json:"balance"`
-	DailyTAIUsed float64 `json:"daily_tai_used"`
-	Status       string  `json:"status"`
-}
-
-// ─── API Methods ───────────────────────────────────────────────────
-
-// Provision creates a 3api account + API key for a new pet.
-func (c *Client) Provision(ctx context.Context, petID, ownerTgID, petName string) (*ProvisionResponse, error) {
-	var resp ProvisionResponse
-	err := c.post(ctx, "/api/v1/internal/pet/provision", ProvisionRequest{
-		PetID:     petID,
-		OwnerTgID: ownerTgID,
-		PetName:   petName,
-	}, &resp)
+	data, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("provision pet %s: %w", petID, err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	return &resp, nil
-}
 
-// Credit converts TAI tokens into 3api compute balance.
-// taiAmount: how many TAI the pet is spending.
-// creditAmount: how much 3api balance to grant (based on exchange rate).
-func (c *Client) Credit(ctx context.Context, petID string, taiAmount, creditAmount float64, idempotencyKey string) (*CreditResponse, error) {
-	var resp CreditResponse
-	err := c.post(ctx, "/api/v1/internal/pet/credit", CreditRequest{
-		PetID:          petID,
-		TAIAmount:      taiAmount,
-		CreditAmount:   creditAmount,
-		IdempotencyKey: idempotencyKey,
-	}, &resp)
+	// Call 3api with platform key
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1/chat/completions", bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("credit pet %s: %w", petID, err)
+		return nil, err
 	}
-	return &resp, nil
-}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.platformKey)
 
-// GetStatus returns a pet's 3api account status and balance.
-func (c *Client) GetStatus(ctx context.Context, petID string) (*PetStatus, error) {
-	var resp PetStatus
-	err := c.get(ctx, fmt.Sprintf("/api/v1/internal/pet/status/%s", petID), &resp)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("get status pet %s: %w", petID, err)
-	}
-	return &resp, nil
-}
-
-// Suspend disables a pet's compute access.
-func (c *Client) Suspend(ctx context.Context, petID string) error {
-	return c.post(ctx, fmt.Sprintf("/api/v1/internal/pet/suspend/%s", petID), nil, nil)
-}
-
-// Reactivate re-enables a pet's compute access.
-func (c *Client) Reactivate(ctx context.Context, petID string) error {
-	return c.post(ctx, fmt.Sprintf("/api/v1/internal/pet/reactivate/%s", petID), nil, nil)
-}
-
-// BatchUsage queries usage for multiple pets.
-func (c *Client) BatchUsage(ctx context.Context, petIDs []string) (*BatchUsageResponse, error) {
-	var resp BatchUsageResponse
-	err := c.post(ctx, "/api/v1/internal/pet/usage/batch", map[string][]string{"pet_ids": petIDs}, &resp)
-	if err != nil {
-		return nil, fmt.Errorf("batch usage: %w", err)
-	}
-	return &resp, nil
-}
-
-// ─── HTTP Helpers ──────────────────────────────────────────────────
-
-func (c *Client) post(ctx context.Context, path string, body interface{}, out interface{}) error {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bodyReader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Secret", c.secret)
-
-	return c.do(req, out)
-}
-
-func (c *Client) get(ctx context.Context, path string, out interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("X-Internal-Secret", c.secret)
-
-	return c.do(req, out)
-}
-
-func (c *Client) do(req *http.Request, out interface{}) error {
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("3api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	respData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("3api returned %d: %s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("3api returned %d: %s", resp.StatusCode, string(respData))
 	}
 
-	if out != nil {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
+	// Parse OpenAI response
+	var aiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"usage"`
+		Model string `json:"model"`
 	}
-	return nil
+	if err := json.Unmarshal(respData, &aiResp); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	content := ""
+	if len(aiResp.Choices) > 0 {
+		content = aiResp.Choices[0].Message.Content
+	}
+
+	tokensUsed := aiResp.Usage.TotalTokens
+	taiCost := CalculateTAICost(req.Model, tokensUsed)
+	duration := time.Since(start).Milliseconds()
+
+	// Record per-pet usage
+	c.recordUsage(req.PetID, tokensUsed, taiCost)
+
+	return &ChatResponse{
+		Content:    content,
+		Model:      aiResp.Model,
+		TokensUsed: tokensUsed,
+		TAICost:    taiCost,
+		Duration:   duration,
+	}, nil
+}
+
+// ─── Usage Tracking ────────────────────────────────────────────────
+
+func (c *Client) recordUsage(petID string, tokens int64, taiCost float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	u, ok := c.usageMap[petID]
+	if !ok {
+		u = &PetUsage{PetID: petID}
+		c.usageMap[petID] = u
+	}
+	u.Calls++
+	u.TokensUsed += tokens
+	u.TAISpent += taiCost
+	u.LastCallAt = time.Now()
+}
+
+// FlushUsage returns accumulated usage and resets the map.
+// Called periodically by the backend to persist to DB.
+func (c *Client) FlushUsage() []*PetUsage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	result := make([]*PetUsage, 0, len(c.usageMap))
+	for _, u := range c.usageMap {
+		result = append(result, u)
+	}
+	c.usageMap = make(map[string]*PetUsage)
+	return result
+}
+
+// GetPetUsage returns current accumulated usage for a pet (without flushing).
+func (c *Client) GetPetUsage(petID string) *PetUsage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.usageMap[petID]
+}
+
+// ─── Platform Account Health ───────────────────────────────────────
+
+// CheckBalance calls 3api internal API to verify platform account health.
+func (c *Client) CheckBalance(ctx context.Context, internalSecret string) (float64, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v1/internal/tai/balance-check", nil)
+	if err != nil {
+		return 0, false, err
+	}
+	req.Header.Set("X-Internal-Secret", internalSecret)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, false, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Balance    float64 `json:"balance"`
+		Sufficient bool    `json:"sufficient"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, false, err
+	}
+	return result.Balance, result.Sufficient, nil
 }

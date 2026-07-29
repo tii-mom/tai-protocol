@@ -23,10 +23,10 @@ type Config struct {
 	AdVault          string `mapstructure:"AD_VAULT"`
 	TreasuryWallet   string `mapstructure:"TREASURY_WALLET"`
 
-	// 3api.shop integration
+	// 3api.shop integration (Phase 0: platform pool model)
 	ThreeAPIBaseURL        string `mapstructure:"THREEAPI_BASE_URL"`
-	ThreeAPIKey            string `mapstructure:"THREEAPI_KEY"`
-	ThreeAPIInternalSecret string `mapstructure:"THREEAPI_INTERNAL_SECRET"` // X-Internal-Secret for pet API
+	ThreeAPIPlatformKey    string `mapstructure:"THREEAPI_PLATFORM_KEY"`    // single key for all pets
+	ThreeAPIInternalSecret string `mapstructure:"THREEAPI_INTERNAL_SECRET"` // for reconciliation endpoints
 
 	// Market maker
 	MMEnabled     bool `mapstructure:"MM_ENABLED"`

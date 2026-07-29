@@ -59,57 +59,55 @@ func OnchainPet(c *gin.Context) {
 	c.JSON(200, gin.H{"tx_hash": "TODO"})
 }
 
-// PetRecharge converts TAI tokens into 3api compute credits.
-// Called by the Agent Executor when a pet needs more API balance.
-// Flow: deduct TAI from pet wallet → call 3api internal /credit → update ledger
-func PetRecharge(c *gin.Context) {
+// PetExecute is the core proxy endpoint (Phase 0).
+// Bot calls this → backend checks TAI balance → proxies to 3api → deducts TAI → returns result.
+// 3api only sees the platform key; per-pet economics are entirely internal.
+func PetExecute(c *gin.Context) {
 	var req struct {
-		PetID     string  `json:"pet_id" binding:"required"`
-		TAIAmount float64 `json:"tai_amount" binding:"required,gt=0"`
+		PetID       string `json:"pet_id" binding:"required"`
+		TaskID      string `json:"task_id"`
+		Model       string `json:"model" binding:"required"`
+		Messages    []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages" binding:"required,min=1"`
+		MaxTokens   int     `json:"max_tokens"`
+		Temperature float64 `json:"temperature"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	// TODO: 1. Verify pet exists and belongs to caller
-	// TODO: 2. Check pet's TAI balance >= req.TAIAmount
-	// TODO: 3. Deduct TAI from pet's wallet (off-chain ledger or on-chain tx)
-	// TODO: 4. Calculate credit amount: creditAmount = taiAmount * 0.001 (USD)
-	// TODO: 5. Call 3api internal API: POST /api/v1/internal/pet/credit
-	//         with idempotency_key = fmt.Sprintf("recharge:%s:%d", petID, timestamp)
-	// TODO: 6. Record in local ledger (tai_spent, credits_received)
-	// TODO: 7. Return new balance
+	// TODO: 1. Load pet from DB, verify exists + active
+	// TODO: 2. Check pet's TAI balance (internal ledger)
+	// TODO: 3. Estimate cost: tokens/1000 * tier rate
+	// TODO: 4. If balance < estimated cost → 402 "insufficient TAI"
+	// TODO: 5. Call threeapi.Client.ChatCompletion (uses platform key)
+	// TODO: 6. Deduct actual TAI cost from pet's ledger
+	// TODO: 7. Record usage event (pet_id, task_id, model, tokens, cost)
+	// TODO: 8. If task_id present, update bounty status
 
-	creditAmount := req.TAIAmount * 0.001 // 1 TAI = $0.001 compute
+	// Placeholder response (will be replaced with real 3api proxy call)
 	c.JSON(200, gin.H{
-		"ok":            true,
-		"pet_id":        req.PetID,
-		"tai_spent":     req.TAIAmount,
-		"credits_added": creditAmount,
+		"content":     "TODO: proxied AI response from 3api",
+		"model":       req.Model,
+		"tokens_used": 0,
+		"tai_cost":    0.0,
 	})
 }
 
-// PetConsume records API call consumption for analytics and billing.
-// Called by the Agent Executor after each successful AI API call.
-func PetConsume(c *gin.Context) {
-	var req struct {
-		PetID      string  `json:"pet_id" binding:"required"`
-		TaskID     string  `json:"task_id"`
-		TAISpent   float64 `json:"tai_spent"`
-		TokensUsed int     `json:"tokens_used"`
-		Timestamp  string  `json:"timestamp"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-
-	// TODO: 1. Record consumption event in DB (for analytics, receipts)
-	// TODO: 2. Update pet's cumulative stats (total_tokens, total_tai_spent)
-	// TODO: 3. Check if pet needs auto-recharge (balance < threshold)
-
-	c.JSON(200, gin.H{"ok": true, "recorded": true})
+// PetUsage returns a pet's compute usage stats.
+func PetUsage(c *gin.Context) {
+	petID := c.Param("id")
+	// TODO: Query usage records from DB
+	c.JSON(200, gin.H{
+		"pet_id":       petID,
+		"total_calls":  0,
+		"total_tokens": 0,
+		"total_tai":    0.0,
+		"today_tai":    0.0,
+	})
 }
 
 // === Market ===

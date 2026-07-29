@@ -1,31 +1,22 @@
 /**
- * TAI Protocol - AI Agent Layer
- * Pets autonomously execute bounty tasks using 3api.shop compute.
- * Framework: LangGraph (task orchestration) + MCP (tool access)
+ * TAI Protocol - AI Agent Executor (Phase 0: Platform Pool Model)
  *
- * Flow: Pet earns TAI → spends TAI to buy 3api credits → uses credits for AI calls → completes bounty → earns more TAI
+ * Architecture:
+ *   Pet → TAI Backend (proxy + TAI deduction) → 3api.shop (platform key)
+ *
+ * The bot NEVER calls 3api directly. All compute goes through the TAI backend
+ * which handles: auth, TAI balance check, proxy to 3api, usage recording.
+ * This keeps the economic loop entirely within TAI's control.
  */
 
 export interface AgentContext {
   petId: string;
-  petWallet: string;
   ownerTgId: string;
-  intelligence: number;    // apt_int
+  intelligence: number;    // apt_int (0-100)
   skills: string[];        // equipped skill categories
-  apiBalance: number;      // remaining 3api credits (USD)
-  taiBalance: number;      // pet's TAI token balance
-  dailyBudget: number;     // user-set spending limit (TAI)
-  apiKey: string;          // 3api API key for this pet
-}
-
-export interface TaskResult {
-  success: boolean;
-  output: string;
-  tokensUsed: number;
-  costCredits: number;     // USD credits consumed on 3api
-  costTAI: number;         // TAI spent to cover those credits
-  duration: number;        // ms
-  model: string;
+  taiBalance: number;      // pet's TAI balance (off-chain ledger)
+  dailyBudget: number;     // user-set daily spending limit (TAI)
+  dailySpent: number;      // TAI spent today
 }
 
 export interface BountyTask {
@@ -36,205 +27,142 @@ export interface BountyTask {
   requiredSkills: string[];
   rewardTAI: number;
   rewardUSDT: number;
-  maxCalls: number;        // estimated API calls needed
+  estimatedTokens: number;  // expected token usage
 }
 
-// Model selection by difficulty tier
-const MODEL_TIERS: Record<string, { model: string; tier: string; taiPerCall: number }> = {
-  D: { model: 'gpt-4o-mini', tier: 'basic', taiPerCall: 1 },
-  C: { model: 'qwen-turbo', tier: 'basic', taiPerCall: 1 },
-  B: { model: 'gpt-4o', tier: 'mid', taiPerCall: 5 },
-  A: { model: 'claude-sonnet-4-20250514', tier: 'premium', taiPerCall: 20 },
-  S: { model: 'claude-opus-4-20250514', tier: 'premium', taiPerCall: 20 },
+export interface TaskResult {
+  success: boolean;
+  output: string;
+  tokensUsed: number;
+  taiCost: number;
+  durationMs: number;
+  model: string;
+}
+
+// Difficulty → model mapping (mirrors backend threeapi/exchange.go)
+const DIFFICULTY_MODEL: Record<string, string> = {
+  D: 'gpt-4o-mini',
+  C: 'qwen-turbo',
+  B: 'gpt-4o',
+  A: 'claude-sonnet-4-20250514',
+  S: 'claude-opus-4-20250514',
+};
+
+// Rough TAI cost per 1000 tokens by difficulty
+const TAI_PER_1K: Record<string, number> = {
+  D: 1.0, C: 0.8, B: 5.0, A: 5.0, S: 20.0,
 };
 
 /**
- * AgentExecutor - runs bounty tasks using AI models via 3api.shop
+ * AgentExecutor - executes bounty tasks via TAI backend proxy.
+ * The backend handles 3api communication and TAI deduction.
  */
 export class AgentExecutor {
-  private threeApiBase: string;
   private backendBase: string;
 
   constructor() {
-    this.threeApiBase = process.env.THREEAPI_BASE_URL || 'https://3api.shop';
     this.backendBase = process.env.BACKEND_URL || 'http://localhost:8080';
   }
 
   /** Check if pet can afford and qualifies for a task */
   canExecute(ctx: AgentContext, task: BountyTask): { eligible: boolean; reason?: string } {
+    // Intelligence gate
     const diffMap: Record<string, number> = { D: 0, C: 40, B: 60, A: 80, S: 95 };
     const requiredInt = diffMap[task.difficulty] || 0;
-
     if (ctx.intelligence < requiredInt) {
-      return { eligible: false, reason: `INT ${ctx.intelligence} < required ${requiredInt}` };
+      return { eligible: false, reason: `INT ${ctx.intelligence} < ${requiredInt}` };
     }
 
-    const tier = MODEL_TIERS[task.difficulty];
-    const estimatedCost = task.maxCalls * tier.taiPerCall;
-    if (ctx.taiBalance < estimatedCost) {
-      return { eligible: false, reason: `TAI ${ctx.taiBalance} < estimated cost ${estimatedCost}` };
-    }
-
-    if (estimatedCost > ctx.dailyBudget) {
-      return { eligible: false, reason: `cost ${estimatedCost} exceeds daily budget ${ctx.dailyBudget}` };
-    }
-
+    // Skill gate
     for (const skill of task.requiredSkills) {
       if (!ctx.skills.includes(skill)) {
         return { eligible: false, reason: `missing skill: ${skill}` };
       }
     }
 
+    // Cost estimation
+    const rate = TAI_PER_1K[task.difficulty] || 1.0;
+    const estimatedCost = (task.estimatedTokens / 1000) * rate;
+
+    if (ctx.taiBalance < estimatedCost) {
+      return { eligible: false, reason: `TAI ${ctx.taiBalance.toFixed(1)} < cost ${estimatedCost.toFixed(1)}` };
+    }
+
+    if (ctx.dailySpent + estimatedCost > ctx.dailyBudget) {
+      return { eligible: false, reason: `daily budget exceeded` };
+    }
+
     return { eligible: true };
   }
 
-  /** Execute a bounty task via 3api.shop OpenAI-compatible endpoint */
+  /**
+   * Execute a bounty task.
+   * Calls TAI backend /api/v1/pet/execute which:
+   *   1. Verifies pet's TAI balance
+   *   2. Proxies to 3api with platform key
+   *   3. Deducts TAI from pet's ledger
+   *   4. Returns AI response + cost
+   */
   async execute(ctx: AgentContext, task: BountyTask): Promise<TaskResult> {
     const startTime = Date.now();
-    const tier = MODEL_TIERS[task.difficulty];
-
-    // Step 1: Ensure pet has enough 3api credits (recharge with TAI if needed)
-    const credited = await this.ensureCredits(ctx, task.maxCalls * tier.taiPerCall);
-    if (!credited) {
-      return {
-        success: false,
-        output: 'Insufficient TAI balance to purchase compute credits',
-        tokensUsed: 0,
-        costCredits: 0,
-        costTAI: 0,
-        duration: Date.now() - startTime,
-        model: tier.model,
-      };
-    }
-
-    // Step 2: Build prompt and call 3api (OpenAI-compatible /v1/chat/completions)
-    const prompt = this.buildPrompt(task);
-    let output = '';
-    let tokensUsed = 0;
+    const model = DIFFICULTY_MODEL[task.difficulty] || 'gpt-4o-mini';
 
     try {
-      const response = await fetch(`${this.threeApiBase}/v1/chat/completions`, {
+      const resp = await fetch(`${this.backendBase}/api/v1/pet/execute`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${ctx.apiKey}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: tier.model,
+          pet_id: ctx.petId,
+          task_id: task.id,
+          model,
           messages: [
             { role: 'system', content: this.systemPrompt(ctx) },
-            { role: 'user', content: prompt },
+            { role: 'user', content: this.taskPrompt(task) },
           ],
           max_tokens: 4096,
           temperature: 0.7,
         }),
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`3api returned ${response.status}: ${errText}`);
+      if (!resp.ok) {
+        const err = await resp.text();
+        return {
+          success: false,
+          output: `Backend error ${resp.status}: ${err}`,
+          tokensUsed: 0,
+          taiCost: 0,
+          durationMs: Date.now() - startTime,
+          model,
+        };
       }
 
-      const data = await response.json() as any;
-      output = data.choices?.[0]?.message?.content || '';
-      tokensUsed = data.usage?.total_tokens || 0;
+      const data = await resp.json() as {
+        content: string;
+        tokens_used: number;
+        tai_cost: number;
+        model: string;
+      };
+
+      return {
+        success: true,
+        output: data.content,
+        tokensUsed: data.tokens_used,
+        taiCost: data.tai_cost,
+        durationMs: Date.now() - startTime,
+        model: data.model,
+      };
     } catch (err: any) {
       return {
         success: false,
-        output: `API call failed: ${err.message}`,
+        output: `Network error: ${err.message}`,
         tokensUsed: 0,
-        costCredits: 0,
-        costTAI: 0,
-        duration: Date.now() - startTime,
-        model: tier.model,
+        taiCost: 0,
+        durationMs: Date.now() - startTime,
+        model,
       };
     }
-
-    // Step 3: Calculate cost and record consumption
-    const costTAI = Math.ceil(tokensUsed / 1000) * tier.taiPerCall; // rough: 1 TAI per 1k tokens for basic
-    const costCredits = costTAI * 0.001; // 1 TAI = $0.001 compute
-
-    // Step 4: Report consumption to TAI backend (for ledger + analytics)
-    await this.reportConsumption(ctx.petId, task.id, costTAI, tokensUsed);
-
-    return {
-      success: true,
-      output,
-      tokensUsed,
-      costCredits,
-      costTAI,
-      duration: Date.now() - startTime,
-      model: tier.model,
-    };
   }
 
-  /**
-   * Ensure pet has enough 3api credits by converting TAI → credits.
-   * Calls TAI backend which in turn calls 3api internal API.
-   */
-  private async ensureCredits(ctx: AgentContext, taiNeeded: number): Promise<boolean> {
-    // Check current 3api balance
-    if (ctx.apiBalance >= taiNeeded * 0.001) {
-      return true; // already have enough USD credits
-    }
-
-    // Need to recharge: spend TAI to get credits
-    if (ctx.taiBalance < taiNeeded) {
-      return false; // not enough TAI
-    }
-
-    try {
-      const resp = await fetch(`${this.backendBase}/api/v1/pet/recharge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pet_id: ctx.petId,
-          tai_amount: taiNeeded,
-        }),
-      });
-      return resp.ok;
-    } catch {
-      return false;
-    }
-  }
-
-  /** Report task consumption to backend for ledger tracking */
-  private async reportConsumption(petId: string, taskId: string, taiSpent: number, tokens: number): Promise<void> {
-    try {
-      await fetch(`${this.backendBase}/api/v1/pet/consume`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pet_id: petId,
-          task_id: taskId,
-          tai_spent: taiSpent,
-          tokens_used: tokens,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-    } catch {
-      // Non-critical: log but don't fail the task
-      console.warn(`Failed to report consumption for pet ${petId}, task ${taskId}`);
-    }
-  }
-
-  /** Build the task prompt for the AI model */
-  private buildPrompt(task: BountyTask): string {
-    return [
-      `## Task: ${task.title}`,
-      ``,
-      task.description,
-      ``,
-      `---`,
-      `Difficulty: ${task.difficulty}`,
-      `Required skills: ${task.requiredSkills.join(', ') || 'none'}`,
-      `Reward: ${task.rewardTAI} TAI + ${task.rewardUSDT} USDT`,
-      ``,
-      `Complete this task thoroughly. Provide structured, actionable output.`,
-    ].join('\n');
-  }
-
-  /** System prompt giving the pet its identity */
   private systemPrompt(ctx: AgentContext): string {
     return [
       `You are a TAI Protocol mecha-pet agent (ID: ${ctx.petId}).`,
@@ -243,15 +171,29 @@ export class AgentExecutor {
       `Be precise, efficient, and thorough. Output in the language the task requires.`,
     ].join('\n');
   }
+
+  private taskPrompt(task: BountyTask): string {
+    return [
+      `## Task: ${task.title}`,
+      '',
+      task.description,
+      '',
+      '---',
+      `Difficulty: ${task.difficulty} | Skills: ${task.requiredSkills.join(', ') || 'none'}`,
+      `Reward: ${task.rewardTAI} TAI + ${task.rewardUSDT} USDT`,
+      '',
+      'Complete this task thoroughly. Provide structured, actionable output.',
+    ].join('\n');
+  }
 }
 
 /**
- * DailyAgentLoop - 7x24 autonomous operation per pet
- * Runs as a background worker, polling for matching tasks.
+ * DailyAgentLoop - 7x24 autonomous operation per pet.
+ * Polls TAI backend for matching bounties, executes, submits results.
  */
 export class DailyAgentLoop {
   private executor: AgentExecutor;
-  private running: boolean = false;
+  private running = false;
   private backendBase: string;
 
   constructor() {
@@ -261,23 +203,25 @@ export class DailyAgentLoop {
 
   async start(petContexts: AgentContext[]) {
     this.running = true;
-    console.log(`Agent loop started for ${petContexts.length} pets`);
+    console.log(`[AgentLoop] started for ${petContexts.length} pets`);
 
     while (this.running) {
       for (const ctx of petContexts) {
         try {
           await this.processPet(ctx);
         } catch (err) {
-          console.error(`Error processing pet ${ctx.petId}:`, err);
+          console.error(`[AgentLoop] pet ${ctx.petId} error:`, err);
         }
       }
-      await this.sleep(60_000); // poll every 60s
+      await this.sleep(60_000);
     }
   }
 
   private async processPet(ctx: AgentContext) {
-    // Fetch available bounties matching this pet
-    const resp = await fetch(`${this.backendBase}/api/v1/bounty/available?pet_id=${ctx.petId}`);
+    // Fetch available bounties for this pet
+    const resp = await fetch(
+      `${this.backendBase}/api/v1/bounty/available?pet_id=${ctx.petId}`
+    );
     if (!resp.ok) return;
 
     const { bounties } = await resp.json() as { bounties: BountyTask[] };
@@ -287,17 +231,17 @@ export class DailyAgentLoop {
       const { eligible } = this.executor.canExecute(ctx, task);
       if (!eligible) continue;
 
-      // Accept the bounty
+      // Accept
       await fetch(`${this.backendBase}/api/v1/bounty/${task.id}/accept`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pet_id: ctx.petId }),
       });
 
-      // Execute
+      // Execute (backend proxies to 3api + deducts TAI)
       const result = await this.executor.execute(ctx, task);
 
-      // Submit result
+      // Submit
       await fetch(`${this.backendBase}/api/v1/bounty/${task.id}/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -306,11 +250,15 @@ export class DailyAgentLoop {
           result: result.output,
           success: result.success,
           tokens_used: result.tokensUsed,
-          cost_tai: result.costTAI,
+          tai_cost: result.taiCost,
         }),
       });
 
-      // Only do one task per cycle per pet (rate limiting)
+      // Update local context
+      ctx.taiBalance -= result.taiCost;
+      ctx.dailySpent += result.taiCost;
+
+      // One task per cycle per pet
       break;
     }
   }
