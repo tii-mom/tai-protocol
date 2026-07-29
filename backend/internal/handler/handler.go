@@ -59,6 +59,59 @@ func OnchainPet(c *gin.Context) {
 	c.JSON(200, gin.H{"tx_hash": "TODO"})
 }
 
+// PetRecharge converts TAI tokens into 3api compute credits.
+// Called by the Agent Executor when a pet needs more API balance.
+// Flow: deduct TAI from pet wallet → call 3api internal /credit → update ledger
+func PetRecharge(c *gin.Context) {
+	var req struct {
+		PetID     string  `json:"pet_id" binding:"required"`
+		TAIAmount float64 `json:"tai_amount" binding:"required,gt=0"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: 1. Verify pet exists and belongs to caller
+	// TODO: 2. Check pet's TAI balance >= req.TAIAmount
+	// TODO: 3. Deduct TAI from pet's wallet (off-chain ledger or on-chain tx)
+	// TODO: 4. Calculate credit amount: creditAmount = taiAmount * 0.001 (USD)
+	// TODO: 5. Call 3api internal API: POST /api/v1/internal/pet/credit
+	//         with idempotency_key = fmt.Sprintf("recharge:%s:%d", petID, timestamp)
+	// TODO: 6. Record in local ledger (tai_spent, credits_received)
+	// TODO: 7. Return new balance
+
+	creditAmount := req.TAIAmount * 0.001 // 1 TAI = $0.001 compute
+	c.JSON(200, gin.H{
+		"ok":            true,
+		"pet_id":        req.PetID,
+		"tai_spent":     req.TAIAmount,
+		"credits_added": creditAmount,
+	})
+}
+
+// PetConsume records API call consumption for analytics and billing.
+// Called by the Agent Executor after each successful AI API call.
+func PetConsume(c *gin.Context) {
+	var req struct {
+		PetID      string  `json:"pet_id" binding:"required"`
+		TaskID     string  `json:"task_id"`
+		TAISpent   float64 `json:"tai_spent"`
+		TokensUsed int     `json:"tokens_used"`
+		Timestamp  string  `json:"timestamp"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: 1. Record consumption event in DB (for analytics, receipts)
+	// TODO: 2. Update pet's cumulative stats (total_tokens, total_tai_spent)
+	// TODO: 3. Check if pet needs auto-recharge (balance < threshold)
+
+	c.JSON(200, gin.H{"ok": true, "recorded": true})
+}
+
 // === Market ===
 
 func GetListings(c *gin.Context) {

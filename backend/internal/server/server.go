@@ -51,6 +51,8 @@ func (s *Server) registerRoutes() {
 		pet.PUT("/:id/name", handler.RenamePet)         // 改名
 		pet.POST("/:id/equip-skill", handler.EquipSkill) // 装备兽决
 		pet.POST("/:id/onchain", handler.OnchainPet)    // 上链
+		pet.POST("/recharge", handler.PetRecharge)      // TAI→3api算力充值
+		pet.POST("/consume", handler.PetConsume)        // 记录API消耗
 	}
 
 	// Market / Trade routes

@@ -24,8 +24,9 @@ type Config struct {
 	TreasuryWallet   string `mapstructure:"TREASURY_WALLET"`
 
 	// 3api.shop integration
-	ThreeAPIBaseURL string `mapstructure:"THREEAPI_BASE_URL"`
-	ThreeAPIKey     string `mapstructure:"THREEAPI_KEY"`
+	ThreeAPIBaseURL        string `mapstructure:"THREEAPI_BASE_URL"`
+	ThreeAPIKey            string `mapstructure:"THREEAPI_KEY"`
+	ThreeAPIInternalSecret string `mapstructure:"THREEAPI_INTERNAL_SECRET"` // X-Internal-Secret for pet API
 
 	// Market maker
 	MMEnabled     bool `mapstructure:"MM_ENABLED"`
