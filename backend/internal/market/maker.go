@@ -1,6 +1,7 @@
 package market
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -26,9 +27,9 @@ type MMBot struct {
 }
 
 type MMConfig struct {
-	BotCount    int
-	IntervalMin time.Duration
-	IntervalMax time.Duration
+	BotCount     int
+	IntervalMin  time.Duration
+	IntervalMax  time.Duration
 	InitialPrice decimal.Decimal
 }
 

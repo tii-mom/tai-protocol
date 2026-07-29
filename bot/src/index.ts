@@ -1,10 +1,10 @@
-import { Bot, Context, session } from "grammy";
+import { Bot, Context, SessionFlavor, session } from "grammy";
 import dotenv from "dotenv";
+import { verifyWebAppInitData } from "./auth.js";
 
 dotenv.config();
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
-const bot = new Bot(process.env.TG_BOT_TOKEN || "");
 
 // Session: stores JWT token after auth
 interface SessionData {
@@ -13,25 +13,37 @@ interface SessionData {
   petId: string | null;
 }
 
+type BotContext = Context & SessionFlavor<SessionData> & { initData?: string };
+
+const bot = new Bot<BotContext>(process.env.TG_BOT_TOKEN || "");
+
 bot.use(session({ initial: (): SessionData => ({ step: "idle", token: null, petId: null }) }));
 
 // ─── Auth helper ───────────────────────────────────────────────────
 
-async function authenticate(ctx: Context): Promise<string | null> {
+async function authenticate(ctx: BotContext): Promise<string | null> {
   const sess = ctx.session as SessionData;
   if (sess.token) return sess.token;
 
-  // Build initData string from the update (for WebApp this comes from Telegram.WebApp)
-  // For bot commands, we use a simplified auth: send tg_user_id directly
-  // In production, Mini App sends real initData; bot commands use internal auth
+  const webAppInitData = ctx.initData;
+  let initData: string;
+
+  if (webAppInitData) {
+    if (!verifyWebAppInitData(webAppInitData, process.env.TG_BOT_TOKEN || "")) {
+      console.error("Invalid or expired WebApp initData");
+      return null;
+    }
+    initData = webAppInitData;
+  } else {
+    initData = buildBotInitData(ctx);
+  }
+
   try {
     const resp = await fetch(`${BACKEND_URL}/api/v1/user/auth/tg`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        // For bot-to-backend auth, we pass user info directly
-        // The backend verifies via bot token (server-to-server trust)
-        init_data: buildBotInitData(ctx),
+        init_data: initData,
       }),
     });
 
@@ -67,7 +79,7 @@ function buildBotInitData(ctx: Context): string {
 
 // ─── Commands ──────────────────────────────────────────────────────
 
-bot.command("start", async (ctx: Context) => {
+bot.command("start", async (ctx: BotContext) => {
   const tgUser = ctx.from;
   if (!tgUser) return;
 
@@ -119,7 +131,7 @@ bot.command("start", async (ctx: Context) => {
   }
 });
 
-bot.command("pet", async (ctx: Context) => {
+bot.command("pet", async (ctx: BotContext) => {
   const token = await authenticate(ctx);
   if (!token) return;
 
@@ -155,7 +167,7 @@ bot.command("market", async (ctx: Context) => {
   await ctx.reply("📈 交易市场即将开放，敬请期待！");
 });
 
-bot.command("earn", async (ctx: Context) => {
+bot.command("earn", async (ctx: BotContext) => {
   const token = await authenticate(ctx);
   if (!token) return;
 
@@ -181,7 +193,7 @@ bot.command("breed", async (ctx: Context) => {
   await ctx.reply("🧬 繁殖系统开发中，即将上线！");
 });
 
-bot.command("bounty", async (ctx: Context) => {
+bot.command("bounty", async (ctx: BotContext) => {
   const token = await authenticate(ctx);
   if (!token) return;
 
@@ -213,7 +225,7 @@ bot.command("bounty", async (ctx: Context) => {
   }
 });
 
-bot.command("task", async (ctx: Context) => {
+bot.command("task", async (ctx: BotContext) => {
   const token = await authenticate(ctx);
   if (!token) return;
 
@@ -279,7 +291,7 @@ bot.command("task", async (ctx: Context) => {
 
 // ─── Text handler (naming + chat) ─────────────────────────────────
 
-bot.on("message:text", async (ctx: Context) => {
+bot.on("message:text", async (ctx: BotContext) => {
   const sess = ctx.session as SessionData;
   const text = ctx.message?.text?.trim();
   if (!text) return;

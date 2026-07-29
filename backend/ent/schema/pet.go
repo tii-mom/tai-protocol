@@ -59,7 +59,7 @@ func (Pet) Fields() []ent.Field {
 
 func (Pet) Edges() []ent.Edge {
 	return []ent.Edge{
-		edge.From("owner", User.Type).Ref("pets").Unique().Field("owner_id"),
+		edge.From("owner", User.Type).Ref("pets").Unique().Field("owner_id").Required(),
 		edge.To("skills", PetSkill.Type),
 	}
 }

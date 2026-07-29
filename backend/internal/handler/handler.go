@@ -2,8 +2,10 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tii-mom/tai-protocol/backend/ent"
 	"github.com/tii-mom/tai-protocol/backend/internal/auth"
 	"github.com/tii-mom/tai-protocol/backend/internal/service"
 	"github.com/tii-mom/tai-protocol/backend/internal/threeapi"
@@ -11,19 +13,23 @@ import (
 
 // Handlers holds all dependencies for HTTP handlers.
 var (
-	UserService *service.UserService
-	PetService  *service.PetService
-	JWT         *auth.JWTManager
-	ThreeAPI    *threeapi.Client
-	BotToken    string
+	UserService   *service.UserService
+	PetService    *service.PetService
+	BountyService *service.BountyService
+	JWT           *auth.JWTManager
+	ThreeAPI      *threeapi.Client
+	DB            *ent.Client
+	BotToken      string
 )
 
 // InitHandlers sets up shared dependencies. Called from server.New().
-func InitHandlers(userSvc *service.UserService, petSvc *service.PetService, jwtMgr *auth.JWTManager, apiClient *threeapi.Client, botToken string) {
+func InitHandlers(userSvc *service.UserService, petSvc *service.PetService, bountySvc *service.BountyService, jwtMgr *auth.JWTManager, apiClient *threeapi.Client, db *ent.Client, botToken string) {
 	UserService = userSvc
 	PetService = petSvc
+	BountyService = bountySvc
 	JWT = jwtMgr
 	ThreeAPI = apiClient
+	DB = db
 	BotToken = botToken
 }
 
@@ -212,8 +218,17 @@ func PetExecute(c *gin.Context) {
 		return
 	}
 
-	// 4. Deduct TAI
+	// 4. Deduct TAI + record usage
 	_ = PetService.DeductPetTAI(c.Request.Context(), req.PetID, result.TAICost)
+	_, _ = DB.UsageLog.Create().
+		SetPetID(req.PetID).
+		SetModel(req.Model).
+		SetPromptTokens(int(result.TokensUsed / 2)).
+		SetCompletionTokens(int(result.TokensUsed / 2)).
+		SetTaiCost(result.TAICost).
+		SetBountyID(req.TaskID).
+		SetCreatedAt(time.Now()).
+		Save(c.Request.Context())
 
 	// 5. Respond
 	c.JSON(http.StatusOK, gin.H{
@@ -287,64 +302,111 @@ func UseSkillBook(c *gin.Context) {
 // CreateBounty publishes a new bounty task.
 func CreateBounty(c *gin.Context) {
 	var req struct {
-		Title       string   `json:"title" binding:"required"`
-		Description string   `json:"description" binding:"required"`
-		Difficulty  string   `json:"difficulty" binding:"required,oneof=D C B A S"`
-		RewardTAI   float64  `json:"reward_tai"`
-		RewardUSDT  float64  `json:"reward_usdt"`
-		RequiredSkills []string `json:"required_skills"`
-		DeadlineHours int      `json:"deadline_hours"`
+		Title         string  `json:"title" binding:"required"`
+		Description   string  `json:"description"`
+		Difficulty    string  `json:"difficulty" binding:"required,oneof=D C B A S"`
+		RewardTAI     float64 `json:"reward_tai"`
+		DeadlineHours int     `json:"deadline_hours"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Auto-calculate rewards if not specified
-	if req.RewardTAI == 0 && req.RewardUSDT == 0 {
-		rewards := map[string][2]float64{
-			"D": {5, 0.01}, "C": {15, 0.03}, "B": {50, 0.1}, "A": {150, 0.3}, "S": {500, 1.0},
-		}
-		r := rewards[req.Difficulty]
-		req.RewardTAI = r[0]
-		req.RewardUSDT = r[1]
+	// Auto-calculate reward if not specified
+	if req.RewardTAI == 0 {
+		req.RewardTAI = service.EstimateReward(req.Difficulty)
 	}
 
 	userID, _ := c.Get("user_id")
+	ttl := time.Duration(req.DeadlineHours) * time.Hour
 
-	// TODO: Call BountyService.CreateBounty with real DB
+	bounty, err := BountyService.CreateBounty(c.Request.Context(), userID.(string), req.Title, req.Description, req.Difficulty, req.RewardTAI, ttl)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
-		"id":           "TODO-uuid",
-		"title":        req.Title,
-		"difficulty":   req.Difficulty,
-		"reward_tai":   req.RewardTAI,
-		"reward_usdt":  req.RewardUSDT,
-		"publisher_id": userID,
-		"status":       "open",
-		"message":      "bounty published, pets will auto-accept matching tasks",
+		"bounty":  bounty,
+		"message": "bounty published, pets will auto-accept matching tasks",
 	})
 }
 
 // GetMyBounties returns bounties published by the current user.
 func GetMyBounties(c *gin.Context) {
-	// TODO: Query bounties WHERE publisher_id = current user
-	c.JSON(http.StatusOK, gin.H{"bounties": []any{}})
+	userID, _ := c.Get("user_id")
+	bounties, err := BountyService.GetByPublisher(c.Request.Context(), userID.(string), 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"bounties": bounties})
 }
 
+// GetBounties returns available (open) bounties.
 func GetBounties(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"bounties": []any{}})
+	bounties, err := BountyService.GetAvailable(c.Request.Context(), 20)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"bounties": bounties})
 }
 
+// AcceptBounty assigns a bounty to a pet.
 func AcceptBounty(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	bountyID := c.Param("id")
+	var req struct {
+		PetID string `json:"pet_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pet_id required"})
+		return
+	}
+
+	if err := BountyService.Accept(c.Request.Context(), bountyID, req.PetID); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "bounty accepted"})
 }
 
+// SubmitBounty stores task result for review.
 func SubmitBounty(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	bountyID := c.Param("id")
+	var req struct {
+		PetID      string `json:"pet_id" binding:"required"`
+		Submission string `json:"submission" binding:"required"`
+		TokensUsed int64  `json:"tokens_used"`
+		TAICost    float64 `json:"tai_cost"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := BountyService.Submit(c.Request.Context(), bountyID, req.PetID, req.Submission, req.TokensUsed, req.TAICost); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "submission received, awaiting publisher confirmation"})
 }
 
+// ConfirmBounty releases payment after publisher approves.
 func ConfirmBounty(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"earned": "TODO"})
+	bountyID := c.Param("id")
+	userID, _ := c.Get("user_id")
+
+	bounty, err := BountyService.Confirm(c.Request.Context(), bountyID, userID.(string))
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"bounty":  bounty,
+		"message": "reward released to pet",
+	})
 }
 
 // === Breeding ===

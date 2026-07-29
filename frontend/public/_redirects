@@ -1,0 +1,3 @@
+# Cloudflare Pages SPA fallback
+# 所有非静态资源请求都回退到 index.html，由 react-router 处理
+/*    /index.html   200

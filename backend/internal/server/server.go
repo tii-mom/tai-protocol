@@ -29,13 +29,14 @@ func New(cfg *config.Config, db *ent.Client) *Server {
 	jwtMgr := auth.NewJWTManager(cfg.JWTSecret)
 	userSvc := service.NewUserService(db)
 	petSvc := service.NewPetService(db)
+	bountySvc := service.NewBountyService(db, petSvc)
 	apiClient := threeapi.NewClient(threeapi.Config{
 		BaseURL:     cfg.ThreeAPIBaseURL,
 		PlatformKey: cfg.ThreeAPIPlatformKey,
 	})
 
 	// Wire handlers
-	handler.InitHandlers(userSvc, petSvc, jwtMgr, apiClient, cfg.TGBotToken)
+	handler.InitHandlers(userSvc, petSvc, bountySvc, jwtMgr, apiClient, db, cfg.TGBotToken)
 
 	s := &Server{cfg: cfg, router: r, jwt: jwtMgr}
 	s.registerRoutes()
