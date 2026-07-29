@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tii-mom/tai-protocol/backend/ent"
 	"github.com/tii-mom/tai-protocol/backend/internal/auth"
 	"github.com/tii-mom/tai-protocol/backend/internal/config"
 	"github.com/tii-mom/tai-protocol/backend/internal/handler"
@@ -18,7 +19,7 @@ type Server struct {
 	jwt    *auth.JWTManager
 }
 
-func New(cfg *config.Config) *Server {
+func New(cfg *config.Config, db *ent.Client) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -26,8 +27,8 @@ func New(cfg *config.Config) *Server {
 
 	// Initialize services
 	jwtMgr := auth.NewJWTManager(cfg.JWTSecret)
-	userSvc := service.NewUserService()
-	petSvc := service.NewPetService()
+	userSvc := service.NewUserService(db)
+	petSvc := service.NewPetService(db)
 	apiClient := threeapi.NewClient(threeapi.Config{
 		BaseURL:     cfg.ThreeAPIBaseURL,
 		PlatformKey: cfg.ThreeAPIPlatformKey,

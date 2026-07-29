@@ -67,7 +67,7 @@ func TGAuth(c *gin.Context) {
 
 func GetMe(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	user, err := UserService.GetByID(c.Request.Context(), userID.(int64))
+	user, err := UserService.GetByID(c.Request.Context(), userID.(string))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
@@ -77,7 +77,7 @@ func GetMe(c *gin.Context) {
 
 func GetMyPets(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	pets, err := PetService.GetByOwner(c.Request.Context(), userID.(int64))
+	pets, err := PetService.GetByOwner(c.Request.Context(), userID.(string))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -107,7 +107,7 @@ func ClaimPet(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	username, _ := c.Get("username")
 
-	pet, err := PetService.ClaimStarterPet(c.Request.Context(), userID.(int64), username.(string))
+	pet, err := PetService.ClaimStarterPet(c.Request.Context(), userID.(string), username.(string))
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return

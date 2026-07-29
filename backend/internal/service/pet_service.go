@@ -5,149 +5,230 @@ import (
 	"fmt"
 	"math/rand"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/tii-mom/tai-protocol/backend/ent"
+	entPet "github.com/tii-mom/tai-protocol/backend/ent/pet"
 )
 
 // PetService handles pet creation, lookup, and state management.
 type PetService struct {
-	// TODO: inject *ent.Client
+	db *ent.Client
 }
 
-func NewPetService() *PetService {
-	return &PetService{}
+func NewPetService(db *ent.Client) *PetService {
+	return &PetService{db: db}
 }
 
-// Pet represents a TAI Protocol mecha-pet.
+// Pet is the API-facing pet representation.
 type Pet struct {
-	ID          string
-	OwnerID     int64
-	Species     string
-	Name        string
-	Quality     string // common, rare, epic, legendary, mythic
-	Generation  int
-	GrowthRate  float64
-	AptHP       int
-	AptATK      int
-	AptDEF      int
-	AptSPD      int
-	AptINT      int
-	SkillSlots  int
-	Personality string
-	Level       int
-	Exp         int
-	Mood        int
-	Energy      int
-	Status      string // idle, working, breeding, trading, resting
-	TAIBalance  float64 // pet's own TAI earnings
-	ImageURL    string
-	CreatedAt   time.Time
+	ID          string    `json:"id"`
+	OwnerID     string    `json:"owner_id"`
+	Name        string    `json:"name"`
+	Species     string    `json:"species"`
+	Quality     string    `json:"quality"`
+	Generation  int       `json:"generation"`
+	GrowthRate  float64   `json:"growth_rate"`
+	AptHP       int       `json:"apt_hp"`
+	AptATK      int       `json:"apt_atk"`
+	AptDEF      int       `json:"apt_def"`
+	AptSPD      int       `json:"apt_spd"`
+	AptINT      int       `json:"apt_int"`
+	SkillSlots  int       `json:"skill_slots"`
+	Personality string    `json:"personality"`
+	Level       int       `json:"level"`
+	Exp         int64     `json:"exp"`
+	Mood        int       `json:"mood"`
+	Energy      int       `json:"energy"`
+	Status      string    `json:"status"`
+	TAIBalance  float64   `json:"tai_balance"`
+	ImageURL    string    `json:"image_url,omitempty"`
+	IsOnChain   bool      `json:"is_on_chain"`
+	TasksDone   int       `json:"total_tasks_done"`
+	TokensUsed  int64     `json:"total_tokens_used"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Species pool for starter pets.
 var starterSpecies = []string{
-	"Rex-Frame",     // 暴龙骨架
-	"Falcon-Unit",   // 猎鹰单元
-	"Titan-Core",    // 泰坦核心
-	"Viper-Drive",   // 毒蛇驱动
-	"Phoenix-Shell", // 凤凰外壳
+	"Rex-Frame", "Falcon-Unit", "Titan-Core", "Viper-Drive", "Phoenix-Shell",
 }
 
 var personalities = []string{
 	"aggressive", "defensive", "balanced", "speedster", "analytical",
 }
 
-// ClaimStarterPet creates a new starter pet for a user.
-// Rules:
-//   - One free starter per user (Generation 0, Common quality)
-//   - Random species, random aptitudes (weighted by species)
-//   - 2 skill slots (upgradeable via breeding)
-func (s *PetService) ClaimStarterPet(ctx context.Context, ownerID int64, ownerName string) (*Pet, error) {
-	// TODO: Check if user already claimed (query pets WHERE owner_id = ? AND generation = 0)
-	// TODO: If exists, return error "already claimed"
+// ClaimStarterPet creates a new starter pet (one free Gen-0 per user).
+func (s *PetService) ClaimStarterPet(ctx context.Context, ownerID string, ownerName string) (*Pet, error) {
+	uid, err := uuid.Parse(ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid owner id")
+	}
+
+	existing, err := s.db.Pet.Query().
+		Where(entPet.OwnerID(uid), entPet.Generation(0)).
+		Count(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("check existing: %w", err)
+	}
+	if existing > 0 {
+		return nil, fmt.Errorf("you already claimed your starter pet")
+	}
 
 	species := starterSpecies[rand.Intn(len(starterSpecies))]
 	personality := personalities[rand.Intn(len(personalities))]
-
-	// Generate aptitudes based on species archetype
 	apt := generateAptitudes(species)
 
-	pet := &Pet{
-		ID:          fmt.Sprintf("gen0-%d-%d", ownerID, time.Now().UnixMilli()%10000),
-		OwnerID:     ownerID,
-		Species:     species,
-		Name:        fmt.Sprintf("%s-α", species),
-		Quality:     "common",
-		Generation:  0,
-		GrowthRate:  1.0 + rand.Float64()*0.2, // 1.0~1.2
-		AptHP:       apt[0],
-		AptATK:      apt[1],
-		AptDEF:      apt[2],
-		AptSPD:      apt[3],
-		AptINT:      apt[4],
-		SkillSlots:  2,
-		Personality: personality,
-		Level:       1,
-		Exp:         0,
-		Mood:        80,
-		Energy:      100,
-		Status:      "idle",
-		TAIBalance:  10.0, // starter bonus: 10 TAI
-		CreatedAt:   time.Now(),
+	newPet, err := s.db.Pet.Create().
+		SetOwnerID(uid).
+		SetName(fmt.Sprintf("%s-α", species)).
+		SetSpecies(species).
+		SetQuality("common").
+		SetGeneration(0).
+		SetGrowthRate(1.0 + rand.Float64()*0.2).
+		SetAptHp(apt[0]).
+		SetAptAtk(apt[1]).
+		SetAptDef(apt[2]).
+		SetAptSpd(apt[3]).
+		SetAptInt(apt[4]).
+		SetSkillSlots(2).
+		SetPersonality(personality).
+		SetLevel(1).
+		SetMood(80).
+		SetEnergy(100).
+		SetStatus("idle").
+		SetTaiBalance(10).
+		Save(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create pet: %w", err)
 	}
 
-	// TODO: Insert into DB via Ent
-	// TODO: Add 10 TAI to user's balance (starter bonus)
-
-	return pet, nil
+	return s.toAPIPet(newPet), nil
 }
 
-// GetByID returns a pet by its ID.
+// GetByID returns a pet by UUID string.
 func (s *PetService) GetByID(ctx context.Context, petID string) (*Pet, error) {
-	// TODO: Ent query
-	return nil, fmt.Errorf("pet %s not found", petID)
+	pid, err := uuid.Parse(petID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pet id")
+	}
+	p, err := s.db.Pet.Get(ctx, pid)
+	if err != nil {
+		return nil, fmt.Errorf("pet not found")
+	}
+	return s.toAPIPet(p), nil
 }
 
 // GetByOwner returns all pets owned by a user.
-func (s *PetService) GetByOwner(ctx context.Context, ownerID int64) ([]*Pet, error) {
-	// TODO: Ent query
-	return []*Pet{}, nil
+func (s *PetService) GetByOwner(ctx context.Context, ownerID string) ([]*Pet, error) {
+	uid, err := uuid.Parse(ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid owner id")
+	}
+	pets, err := s.db.Pet.Query().
+		Where(entPet.OwnerID(uid)).
+		Order(ent.Desc(entPet.FieldCreatedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Pet, len(pets))
+	for i, p := range pets {
+		result[i] = s.toAPIPet(p)
+	}
+	return result, nil
 }
 
-// DeductPetTAI deducts TAI from a pet's balance for compute costs.
+// DeductPetTAI deducts TAI from a pet's balance.
 func (s *PetService) DeductPetTAI(ctx context.Context, petID string, amount float64) error {
-	// TODO: UPDATE pets SET tai_balance = tai_balance - ? WHERE id = ? AND tai_balance >= ?
-	return nil
+	pid, err := uuid.Parse(petID)
+	if err != nil {
+		return fmt.Errorf("invalid pet id")
+	}
+	_, err = s.db.Pet.UpdateOneID(pid).
+		AddTaiBalance(-amount).
+		AddTotalSpentTai(amount).
+		Save(ctx)
+	return err
 }
 
-// AddPetTAI adds TAI earnings to a pet's balance.
+// AddPetTAI adds TAI earnings to a pet.
 func (s *PetService) AddPetTAI(ctx context.Context, petID string, amount float64) error {
-	// TODO: UPDATE pets SET tai_balance = tai_balance + ? WHERE id = ?
-	return nil
+	pid, err := uuid.Parse(petID)
+	if err != nil {
+		return fmt.Errorf("invalid pet id")
+	}
+	_, err = s.db.Pet.UpdateOneID(pid).
+		AddTaiBalance(amount).
+		AddTotalEarnedTai(amount).
+		Save(ctx)
+	return err
 }
 
-// generateAptitudes creates weighted aptitudes based on species archetype.
-// Total aptitude points = 100, distributed by species tendency.
+// RecordTaskCompletion updates pet stats after a task.
+func (s *PetService) RecordTaskCompletion(ctx context.Context, petID string, tokensUsed int64, taiCost float64) error {
+	pid, err := uuid.Parse(petID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Pet.UpdateOneID(pid).
+		AddTotalTokensUsed(tokensUsed).
+		AddTotalTasksDone(1).
+		AddTotalSpentTai(taiCost).
+		AddTaiBalance(-taiCost).
+		AddExp(tokensUsed / 10).
+		Save(ctx)
+	return err
+}
+
+func (s *PetService) toAPIPet(p *ent.Pet) *Pet {
+	return &Pet{
+		ID:          p.ID.String(),
+		OwnerID:     p.OwnerID.String(),
+		Name:        p.Name,
+		Species:     p.Species,
+		Quality:     p.Quality,
+		Generation:  p.Generation,
+		GrowthRate:  p.GrowthRate,
+		AptHP:       p.AptHp,
+		AptATK:      p.AptAtk,
+		AptDEF:      p.AptDef,
+		AptSPD:      p.AptSpd,
+		AptINT:      p.AptInt,
+		SkillSlots:  p.SkillSlots,
+		Personality: p.Personality,
+		Level:       p.Level,
+		Exp:         p.Exp,
+		Mood:        p.Mood,
+		Energy:      p.Energy,
+		Status:      p.Status,
+		TAIBalance:  p.TaiBalance,
+		ImageURL:    p.ImageURL,
+		IsOnChain:   p.IsOnChain,
+		TasksDone:   p.TotalTasksDone,
+		TokensUsed:  p.TotalTokensUsed,
+		CreatedAt:   p.CreatedAt,
+	}
+}
+
 func generateAptitudes(species string) [5]int {
-	// Base distributions [HP, ATK, DEF, SPD, INT]
 	var base [5]int
 	switch species {
-	case "Rex-Frame": // tank: high HP/DEF
+	case "Rex-Frame":
 		base = [5]int{30, 20, 25, 10, 15}
-	case "Falcon-Unit": // speed: high SPD/INT
+	case "Falcon-Unit":
 		base = [5]int{15, 15, 10, 35, 25}
-	case "Titan-Core": // power: high ATK/HP
+	case "Titan-Core":
 		base = [5]int{25, 30, 20, 10, 15}
-	case "Viper-Drive": // assassin: high SPD/ATK
+	case "Viper-Drive":
 		base = [5]int{15, 25, 10, 30, 20}
-	case "Phoenix-Shell": // mage: high INT/HP
+	case "Phoenix-Shell":
 		base = [5]int{20, 10, 15, 15, 40}
 	default:
 		base = [5]int{20, 20, 20, 20, 20}
 	}
-
-	// Add randomness ±5 per stat
 	var result [5]int
 	for i := range base {
-		jitter := rand.Intn(11) - 5 // -5 to +5
+		jitter := rand.Intn(11) - 5
 		result[i] = base[i] + jitter
 		if result[i] < 5 {
 			result[i] = 5

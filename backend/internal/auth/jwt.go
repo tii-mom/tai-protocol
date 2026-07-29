@@ -24,14 +24,14 @@ func NewJWTManager(secret string) *JWTManager {
 
 // Claims is the JWT payload for TAI Protocol users.
 type Claims struct {
-	UserID    int64  `json:"user_id"`
+	UserID    string `json:"user_id"` // UUID
 	TGUserID  int64  `json:"tg_user_id"`
 	Username  string `json:"username"`
 	jwt.RegisteredClaims
 }
 
 // IssueToken creates a JWT for an authenticated user.
-func (m *JWTManager) IssueToken(userID, tgUserID int64, username string) (string, error) {
+func (m *JWTManager) IssueToken(userID string, tgUserID int64, username string) (string, error) {
 	now := time.Now()
 	claims := Claims{
 		UserID:   userID,
